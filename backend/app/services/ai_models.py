@@ -1,23 +1,19 @@
 """
-AI model wrappers for Cleanify.ai.
+AI model wrappers for Cleanify.ai — local free models only.
 
-Each function is an async stub that falls back gracefully when the
-underlying library is not installed.  Production deployments should
-install the corresponding packages and remove the stubs.
-
-Production stack:
-  - remove_background  → rembg          (pip install rembg)
-  - remove_watermark   → lama-cleaner   (pip install lama-cleaner)  or IOPaint
-  - remove_object      → Grounded-SAM + LaMa inpainting
-  - upscale_image      → Real-ESRGAN    (pip install realesrgan)
-  - auto_detect        → GPT-4o Vision  (pip install openai)
-  - inpaint_region     → IOPaint / LaMa (pip install iopaint)
+  - remove_background  → rembg (pip install rembg, free & local)
+  - remove_watermark   → OpenCV TELEA inpainting (cv2, already in requirements)
+  - inpaint_region     → OpenCV TELEA inpainting
+  - upscale_image      → Lanczos + sharpening (PIL, no extra deps)
+  - auto_detect        → OpenCV heuristic (no extra deps)
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
+import cv2
+import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -26,15 +22,12 @@ logger = logging.getLogger(__name__)
 # ─── Background Removal ───────────────────────────────────────────────────────
 
 async def remove_background(img: Image.Image) -> Image.Image:
-    """
-    Remove image background, returning RGBA with transparent bg.
-    Production: pip install rembg
-    """
+    """Remove image background using rembg (free, local, no API key needed)."""
     try:
         from rembg import remove  # type: ignore
         return remove(img)
     except ImportError:
-        logger.debug("rembg not installed — skipping background removal")
+        logger.warning("rembg not installed — run: pip install rembg")
         return img
 
 
@@ -45,140 +38,126 @@ async def remove_watermark(
     mask: Optional[Image.Image] = None,
 ) -> Image.Image:
     """
-    Detect and inpaint watermarks.
-    Production: IOPaint / lama-cleaner with auto-mask generation.
-    If `mask` is provided (from Manual Wand), use it directly via inpaint_region.
+    Detect and inpaint watermarks using OpenCV TELEA inpainting.
+    If mask provided (from Manual Wand), uses it directly.
+    Otherwise auto-detects text-like regions with adaptive thresholding.
     """
     if mask is not None:
         return await inpaint_region(img, mask)
 
     try:
-        # Example with iopaint (async CLI or Python API)
-        # from iopaint import run_model
-        # return await run_model(img, mask=mask, model="lama")
-        pass
+        img_rgb = np.array(img.convert("RGB"))
+        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+
+        thresh = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            blockSize=15, C=4,
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 5))
+        dilated = cv2.dilate(thresh, kernel, iterations=3)
+
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        h, w = gray.shape
+        wm_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for cnt in contours:
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            area = cw * ch
+            if area < (w * h) * 0.0003 or area > (w * h) * 0.40:
+                continue
+            aspect = cw / max(ch, 1)
+            if aspect < 1.2 or cw / w > 0.85:
+                continue
+            cv2.rectangle(wm_mask, (x, y), (x + cw, y + ch), 255, -1)
+
+        if wm_mask.max() == 0:
+            return img
+
+        result = cv2.inpaint(img_rgb, wm_mask, inpaintRadius=4, flags=cv2.INPAINT_TELEA)
+        out = Image.fromarray(result)
+        return out.convert(img.mode) if img.mode != "RGB" else out
+
     except Exception as exc:
-        logger.warning("Watermark removal model failed: %s", exc)
-    return img
+        logger.warning("Watermark removal failed: %s", exc)
+        return img
 
 
 async def remove_object(img: Image.Image, prompt: str) -> Image.Image:
     """
-    Segment and inpaint a described object.
-    Production: Grounded-SAM (GroundingDINO + SAM) → LaMa inpainting.
+    Remove described objects. For text/watermark/logo prompts, delegates to
+    remove_watermark. Full accuracy needs Grounded-SAM (production upgrade).
     """
-    try:
-        # segment with GroundingDINO, then inpaint with LaMa
-        pass
-    except Exception as exc:
-        logger.warning("Object removal failed for prompt '%s': %s", prompt, exc)
+    text_keywords = ("text", "watermark", "logo", "stamp", "overlay", "caption", "subtitle")
+    if any(kw in prompt.lower() for kw in text_keywords):
+        return await remove_watermark(img)
     return img
 
 
 # ─── Upscaling ────────────────────────────────────────────────────────────────
 
 async def upscale_image(img: Image.Image, factor: int = 4) -> Image.Image:
-    """
-    AI upscale using Real-ESRGAN.
-    Production: pip install realesrgan
-    Stub: basic Lanczos resize.
-    """
-    try:
-        from realesrgan import RealESRGANer  # type: ignore
-        # upscaler = RealESRGANer(scale=factor, ...)
-        # return upscaler.enhance(img)
-        pass
-    except ImportError:
-        pass
-
-    # Better Lanczos fallback with sharpening
+    """Upscale using Lanczos + sharpening. No extra deps needed."""
     from PIL import ImageEnhance
     w, h = img.size
     upscaled = img.resize((w * factor, h * factor), Image.LANCZOS)
-    enhancer = ImageEnhance.Sharpness(upscaled)
-    return enhancer.enhance(1.4)
+    return ImageEnhance.Sharpness(upscaled).enhance(1.5)
 
 
-# ─── Auto-Detection (Vision AI) ───────────────────────────────────────────────
+# ─── Auto-Detection ───────────────────────────────────────────────────────────
 
 async def auto_detect_pipeline(img: Image.Image) -> dict:
-    """
-    Analyse an image and recommend pipeline operations.
-    Production: GPT-4o Vision or a custom binary classifier.
-
-    Returns a dict of recommended operations with confidence scores.
-    """
+    """Heuristic watermark detection using OpenCV — no API key needed."""
     try:
-        import base64, io, os
-        from openai import AsyncOpenAI  # type: ignore
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        b64 = base64.b64encode(buf.getvalue()).decode()
-
-        client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    {"type": "text", "text": (
-                        "Analyse this product image. Respond with JSON only:\n"
-                        '{"watermark_detected": bool, "complex_background": bool, '
-                        '"low_resolution": bool, "confidence": float}'
-                    )},
-                ],
-            }],
-            max_tokens=100,
+        img_np = np.array(img.convert("RGB"))
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 4
         )
-        import json
-        return json.loads(resp.choices[0].message.content or "{}")
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 3))
+        dilated = cv2.dilate(thresh, kernel, iterations=2)
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        h, w = gray.shape
+        text_regions = sum(
+            1 for cnt in contours
+            if (lambda x, y, cw, ch: (
+                (w * h) * 0.0005 < cw * ch < (w * h) * 0.35
+                and cw / max(ch, 1) >= 1.5
+                and cw / w <= 0.80
+            ))(*cv2.boundingRect(cnt))
+        )
+        detected = text_regions >= 2
+        return {
+            "watermark_detected": detected,
+            "complex_background": False,
+            "low_resolution": min(img.width, img.height) < 400,
+            "confidence": 0.80 if detected else 0.30,
+        }
     except Exception as exc:
-        logger.debug("Auto-detect failed: %s — returning heuristic defaults", exc)
-
-    return {
-        "watermark_detected": True,
-        "complex_background": False,
-        "low_resolution": False,
-        "confidence": 0.70,
-    }
+        logger.debug("Auto-detect failed: %s", exc)
+        return {"watermark_detected": True, "complex_background": False, "low_resolution": False, "confidence": 0.70}
 
 
 # ─── Inpainting ───────────────────────────────────────────────────────────────
 
 async def inpaint_region(img: Image.Image, mask: Image.Image) -> Image.Image:
     """
-    Inpaint the masked region using LaMa / IOPaint.
-    Falls back to a simple content-aware fill using PIL.
-
-    Parameters
-    ----------
-    img  : source image (any mode)
-    mask : mask image — white (255) = area to inpaint, black (0) = keep
+    Inpaint masked region using OpenCV TELEA algorithm.
+    mask: white (255) = inpaint, black (0) = keep.
     """
     try:
-        from iopaint.model_manager import ModelManager  # type: ignore
-        from iopaint.schema import InpaintRequest, HDStrategy  # type: ignore
-        import numpy as np
-
-        img_np  = np.array(img.convert("RGB"))
+        img_rgb = np.array(img.convert("RGB"))
         mask_np = np.array(mask.convert("L"))
-
-        manager = ModelManager(name="lama", device="cpu")
-        result_np = manager(img_np, mask_np)
-        return Image.fromarray(result_np)
-    except (ImportError, Exception) as exc:
-        if not isinstance(exc, ImportError):
-            logger.warning("IOPaint inpainting failed: %s — using PIL fallback", exc)
-
-    # Fallback: blur-based inpainting approximation (Pillow)
-    from PIL import ImageFilter
-
-    result = img.copy().convert("RGBA")
-    mask_l = mask.convert("L").resize(img.size)
-
-    # Fill masked areas with a heavily blurred version of the image
-    blurred = img.filter(ImageFilter.GaussianBlur(radius=15))
-    result = Image.composite(blurred.convert("RGBA"), result, mask_l)
-    return result.convert(img.mode) if img.mode != "RGBA" else result
+        _, mask_bin = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+        result = cv2.inpaint(img_rgb, mask_bin, inpaintRadius=4, flags=cv2.INPAINT_TELEA)
+        out = Image.fromarray(result)
+        return out.convert(img.mode) if img.mode not in ("RGB", "RGBA") else out
+    except Exception as exc:
+        logger.warning("Inpainting failed: %s — using blur fallback", exc)
+        from PIL import ImageFilter
+        result = img.copy().convert("RGBA")
+        mask_l = mask.convert("L").resize(img.size)
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=15))
+        result = Image.composite(blurred.convert("RGBA"), result, mask_l)
+        return result.convert(img.mode) if img.mode != "RGBA" else result

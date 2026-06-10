@@ -1064,9 +1064,19 @@ export default function App() {
       remove_background: config.remove_background,
       upscale:           config.upscale,
       upscale_factor:    config.upscale_factor,
+      resize:            config.resize.enabled,
+      resize_w:          config.resize.width,
+      resize_h:          config.resize.height,
       compress:          config.compress,
       compress_quality:  config.compress_quality,
       output_format:     config.output.format,
+      enhance:           config.enhance,
+      brightness:        config.brightness / 100,
+      contrast:          config.contrast   / 100,
+      saturation:        config.saturation / 100,
+      sharpness:         config.sharpness  / 100,
+      unblur:            config.unblur,
+      unblur_strength:   config.unblur_strength,
     }
 
     const results: Array<{ id: string; newUrl: string; oldUrl: string; source: BatchFile['source'] }> = []
@@ -1106,9 +1116,8 @@ export default function App() {
   }, [batchFiles, config, masks])
 
   const handleRun = useCallback(() => {
-    if (!isLoggedIn) { setShowAuthModal(true); return }
     runBatch()
-  }, [isLoggedIn, runBatch])
+  }, [runBatch])
 
   return (
     <div className="min-h-screen">

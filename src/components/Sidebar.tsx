@@ -4,6 +4,7 @@ import {
   ChevronDown, Eraser, Layers, ArrowUpCircle, Sparkles,
   Wand2, Scissors, ImagePlus, Stamp, Play,
   Copy, Check, Terminal, ChevronRight,
+  Sliders, Sun, Scan, FileImage,
 } from 'lucide-react'
 import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
@@ -185,6 +186,8 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
     config.remove_watermark,
     config.remove_background,
     config.upscale,
+    config.unblur,
+    config.enhance,
     config.watermark.enabled,
     !!config.object_removal_prompt.trim(),
   ].filter(Boolean).length
@@ -290,7 +293,7 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
               </ToggleRow>
               <ToggleRow
                 icon={<ArrowUpCircle className="h-[14px] w-[14px]" strokeWidth={1.75} />}
-                label="Upscaling" description="Real-ESRGAN · up to 4×"
+                label="Upscaling" description="Lanczos · up to 4×"
                 checked={config.upscale} onToggle={(v) => onChange({ upscale: v })}
               >
                 <div className="flex gap-1.5">
@@ -303,6 +306,14 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
                     </motion.button>
                   ))}
                 </div>
+              </ToggleRow>
+              <ToggleRow
+                icon={<Scan className="h-[14px] w-[14px]" strokeWidth={1.75} />}
+                label="Unblur & Sharpen" description="Remove blur, recover detail"
+                checked={config.unblur} onToggle={(v) => onChange({ unblur: v })}
+              >
+                <LabeledSlider label="Strength" value={config.unblur_strength}
+                  onChange={(v) => onChange({ unblur_strength: v })} min={1} max={5} />
               </ToggleRow>
             </div>
           </AccordionSection>
@@ -318,8 +329,20 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
           >
             <div className="space-y-2">
               <p className="text-[11px] font-[300] text-gray-400">
-                Describe what to remove — AI finds and erases it across all images.
+                Describe what to remove — or pick a quick preset.
               </p>
+              <div className="flex flex-wrap gap-1.5">
+                {(['Remove text overlay', 'Remove logo', 'Remove watermark stamp'] as const).map((preset) => (
+                  <button key={preset}
+                    onClick={() => onChange({ object_removal_prompt: config.object_removal_prompt === preset ? '' : preset })}
+                    className={cn('rounded-full border px-2.5 py-0.5 text-[10px] font-[600] transition-all',
+                      config.object_removal_prompt === preset
+                        ? 'border-[var(--primary)]/30 bg-[var(--primary)]/10 text-[var(--primary)]'
+                        : 'border-gray-200 bg-white/60 text-gray-500 hover:bg-white hover:text-gray-700')}>
+                    {preset}
+                  </button>
+                ))}
+              </div>
               <div className="relative">
                 <input
                   type="text" value={config.object_removal_prompt}
@@ -338,6 +361,44 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
                   )}
                 </AnimatePresence>
               </div>
+            </div>
+          </AccordionSection>
+        </motion.div>
+
+        {/* Photo Enhancer */}
+        <motion.div variants={sidebarItem}>
+          <AccordionSection title="Photo Enhancer" icon={<Sliders className="h-4 w-4" strokeWidth={1.75} />}>
+            <div className="space-y-2">
+              <ToggleRow
+                icon={<Sun className="h-[14px] w-[14px]" strokeWidth={1.75} />}
+                label="Adjust Colors & Tone" description="Brightness, contrast, saturation"
+                checked={config.enhance} onToggle={(v) => onChange({ enhance: v })}
+              >
+                <div className="space-y-2.5 pt-1">
+                  <LabeledSlider label="Brightness" value={config.brightness}
+                    onChange={(v) => onChange({ brightness: v })} min={25} max={200} unit="%" />
+                  <LabeledSlider label="Contrast" value={config.contrast}
+                    onChange={(v) => onChange({ contrast: v })} min={25} max={200} unit="%" />
+                  <LabeledSlider label="Saturation" value={config.saturation}
+                    onChange={(v) => onChange({ saturation: v })} min={0} max={200} unit="%" />
+                  <LabeledSlider label="Sharpness" value={config.sharpness}
+                    onChange={(v) => onChange({ sharpness: v })} min={0} max={300} unit="%" />
+                  <div className="flex gap-1.5 pt-0.5">
+                    <button onClick={() => onChange({ brightness: 100, contrast: 100, saturation: 100, sharpness: 100 })}
+                      className="rounded-lg border border-gray-200 bg-white/60 px-2.5 py-1 text-[10px] font-[600] text-gray-500 hover:bg-white hover:text-gray-700 transition-all">
+                      Reset
+                    </button>
+                    <button onClick={() => onChange({ brightness: 110, contrast: 115, saturation: 120, sharpness: 130 })}
+                      className="rounded-lg border border-gray-200 bg-white/60 px-2.5 py-1 text-[10px] font-[600] text-gray-500 hover:bg-white hover:text-gray-700 transition-all">
+                      Vivid
+                    </button>
+                    <button onClick={() => onChange({ brightness: 90, contrast: 85, saturation: 70, sharpness: 90 })}
+                      className="rounded-lg border border-gray-200 bg-white/60 px-2.5 py-1 text-[10px] font-[600] text-gray-500 hover:bg-white hover:text-gray-700 transition-all">
+                      Matte
+                    </button>
+                  </div>
+                </div>
+              </ToggleRow>
             </div>
           </AccordionSection>
         </motion.div>
@@ -416,6 +477,27 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
                 <LabeledSlider label="Quality" value={config.compress_quality}
                   onChange={(v) => onChange({ compress_quality: v })} unit="%" />
               </ToggleRow>
+              {/* Output Format */}
+              <div className="pt-1">
+                <div className="mb-2 flex items-center gap-2">
+                  <FileImage className="h-3.5 w-3.5 text-[var(--primary)]" strokeWidth={1.75} />
+                  <span className="text-[11px] font-[700] uppercase tracking-[0.08em] text-gray-500">Output Format</span>
+                </div>
+                <div className="flex gap-1.5">
+                  {(['jpg', 'png', 'webp', 'avif'] as const).map((f) => (
+                    <button key={f}
+                      onClick={() => onChange({ output: { ...config.output, format: f } })}
+                      className={cn(
+                        'flex-1 rounded-lg py-1.5 text-[11px] font-[700] uppercase tracking-wide transition-all',
+                        config.output.format === f
+                          ? 'bg-gray-900 text-white'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      )}>
+                      {f}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </AccordionSection>
         </motion.div>

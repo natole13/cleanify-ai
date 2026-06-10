@@ -58,6 +58,15 @@ export interface PipelineConfig {
   watermark: WatermarkConfig
   resize: ResizeConfig
   output: OutputConfig
+  // Photo Enhancer
+  enhance: boolean
+  brightness: number   // 25–200, default 100 (= 1.0×)
+  contrast: number     // 25–200, default 100
+  saturation: number   // 0–200, default 100
+  sharpness: number    // 0–300, default 100
+  // Unblur
+  unblur: boolean
+  unblur_strength: number  // 1–5, default 2
 }
 
 export const defaultConfig: PipelineConfig = {
@@ -94,6 +103,13 @@ export const defaultConfig: PipelineConfig = {
     quality: 90,
     rename_pattern: '{name}_clean',
   },
+  enhance: false,
+  brightness: 100,
+  contrast: 100,
+  saturation: 100,
+  sharpness: 100,
+  unblur: false,
+  unblur_strength: 2,
 }
 
 const BG_MAP: Record<Exclude<BgMode, 'custom'>, string> = {
@@ -136,6 +152,17 @@ export function buildPipelineJSON(config: PipelineConfig, batchCount: number): o
   if (config.upscale) {
     pipeline.upscale = true
     pipeline.upscale_factor = config.upscale_factor
+  }
+  if (config.unblur) {
+    pipeline.unblur = true
+    pipeline.unblur_strength = config.unblur_strength
+  }
+  if (config.enhance) {
+    pipeline.enhance = true
+    pipeline.brightness = config.brightness / 100
+    pipeline.contrast   = config.contrast   / 100
+    pipeline.saturation = config.saturation / 100
+    pipeline.sharpness  = config.sharpness  / 100
   }
   if (config.watermark.enabled) {
     const wm = config.watermark

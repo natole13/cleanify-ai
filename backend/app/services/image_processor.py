@@ -45,13 +45,36 @@ def apply_deterministic_ops(img: Image.Image, ops: dict) -> tuple[Image.Image, i
     Returns (processed_image, compress_quality_or_None).
     Compression itself is applied at export time via the quality parameter.
     """
+    from PIL import ImageEnhance, ImageFilter
+
+    # Photo Enhance (brightness / contrast / saturation / sharpness)
+    if ops.get("enhance"):
+        brightness = float(ops.get("brightness", 1.0))
+        contrast   = float(ops.get("contrast",   1.0))
+        saturation = float(ops.get("saturation", 1.0))
+        sharpness  = float(ops.get("sharpness",  1.0))
+        if brightness != 1.0:
+            img = ImageEnhance.Brightness(img).enhance(brightness)
+        if contrast != 1.0:
+            img = ImageEnhance.Contrast(img).enhance(contrast)
+        if saturation != 1.0:
+            img = ImageEnhance.Color(img).enhance(saturation)
+        if sharpness != 1.0:
+            img = ImageEnhance.Sharpness(img).enhance(sharpness)
+
+    # Unblur / Sharpen (UnsharpMask)
+    if ops.get("unblur"):
+        strength = float(ops.get("unblur_strength", 2.0))
+        img = img.filter(ImageFilter.UnsharpMask(
+            radius=2, percent=int(strength * 80), threshold=3
+        ))
+
     # Crop
     if ops.get("crop"):
         x = ops.get("crop_x", 0)
         y = ops.get("crop_y", 0)
         w = ops.get("crop_w", img.width)
         h = ops.get("crop_h", img.height)
-        # Clamp to image bounds
         x2 = min(x + w, img.width)
         y2 = min(y + h, img.height)
         img = img.crop((x, y, x2, y2))
@@ -65,7 +88,6 @@ def apply_deterministic_ops(img: Image.Image, ops: dict) -> tuple[Image.Image, i
     # Output format conversion
     out_fmt = (ops.get("output_format") or "png").lower()
     if out_fmt in ("jpg", "jpeg"):
-        # JPEG cannot store alpha
         if img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGB")
 
