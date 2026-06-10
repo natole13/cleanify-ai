@@ -1042,32 +1042,68 @@ export default function App() {
     )
   }, [batchFiles, currentIndex])
 
-  const runBatch = useCallback(() => {
-    const total = batchFiles.length
+  const handleUpdateFile = useCallback((fileId: string, newUrl: string) => {
+    setBatchFiles(prev => prev.map(f => {
+      if (f.id !== fileId) return f
+      if (f.source === 'upload') URL.revokeObjectURL(f.url)
+      return { ...f, url: newUrl }
+    }))
+  }, [])
+
+  const runBatch = useCallback(async () => {
+    const files = batchFiles
+    const total = files.length
     if (total === 0) return
     if (batchIntervalRef.current) clearInterval(batchIntervalRef.current)
 
     setBatchProgress({ active: true, current: 0, total })
     setCurrentIndex(0)
 
-    let idx = 0
-    // Scale speed so the full scroll takes ~5 seconds regardless of batch size
-    const intervalMs = Math.max(5, Math.min(1000, 5000 / total))
+    const ops = {
+      remove_watermark:  config.remove_watermark,
+      remove_background: config.remove_background,
+      upscale:           config.upscale,
+      upscale_factor:    config.upscale_factor,
+      compress:          config.compress,
+      compress_quality:  config.compress_quality,
+      output_format:     config.output.format,
+    }
 
-    batchIntervalRef.current = setInterval(() => {
-      idx++
-      setCurrentIndex((prev) => (prev + 1) % total)
-      setBatchProgress({ active: true, current: idx, total })
+    const results: Array<{ id: string; newUrl: string; oldUrl: string; source: BatchFile['source'] }> = []
 
-      if (idx >= total) {
-        if (batchIntervalRef.current) clearInterval(batchIntervalRef.current)
-        setTimeout(() => {
-          setBatchProgress(null)
-          setCurrentIndex(0)
-        }, 900)
-      }
-    }, intervalMs)
-  }, [batchFiles.length])
+    for (let i = 0; i < total; i++) {
+      setCurrentIndex(i)
+      setBatchProgress({ active: true, current: i + 1, total })
+      const file = files[i]
+      try {
+        const raw  = await fetch(file.url)
+        const blob = await raw.blob()
+        const form = new FormData()
+        form.append('file', blob, file.name + '.png')
+        form.append('operations', JSON.stringify({
+          ...ops,
+          ...(masks[file.id] ? { mask_dataurl: masks[file.id] } : {}),
+        }))
+        const res = await fetch('/api/v1/process-image', { method: 'POST', body: form })
+        if (res.ok) {
+          const out = await res.blob()
+          results.push({ id: file.id, newUrl: URL.createObjectURL(out), oldUrl: file.url, source: file.source })
+        }
+      } catch { /* backend offline — skip */ }
+    }
+
+    if (results.length > 0) {
+      setBatchFiles(prev => prev.map(f => {
+        const r = results.find(x => x.id === f.id)
+        if (!r) return f
+        if (r.source === 'upload') URL.revokeObjectURL(r.oldUrl)
+        return { ...f, url: r.newUrl }
+      }))
+    }
+
+    setBatchProgress(null)
+    setCurrentIndex(0)
+  }, [batchFiles, config, masks])
 
   const handleRun = useCallback(() => {
     if (!isLoggedIn) { setShowAuthModal(true); return }
@@ -1097,6 +1133,7 @@ export default function App() {
           onFilesUpload={handleFilesUpload}
           config={config}
           onMaskSave={handleMaskSave}
+          onUpdateFile={handleUpdateFile}
           batchProgress={batchProgress}
           onRemoveBg={handleRemoveBg}
         />

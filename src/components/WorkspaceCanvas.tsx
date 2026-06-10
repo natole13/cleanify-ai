@@ -21,6 +21,7 @@ interface Props {
   onFilesUpload: (files: File[]) => void
   config: PipelineConfig
   onMaskSave?: (fileId: string, maskDataUrl: string) => void
+  onUpdateFile?: (fileId: string, newUrl: string) => void
   batchProgress?: BatchProgress | null
   onRemoveBg?: () => Promise<void>
 }
@@ -64,7 +65,7 @@ async function getFilesFromDataTransfer(dt: DataTransfer): Promise<File[]> {
 
 export function WorkspaceCanvas({
   batchFiles, currentIndex, onChangeIndex, onFilesUpload,
-  config, onMaskSave, batchProgress, onRemoveBg,
+  config, onMaskSave, onUpdateFile, batchProgress, onRemoveBg,
 }: Props) {
   const containerRef    = useRef<HTMLDivElement>(null)
   const canvasElRef     = useRef<HTMLCanvasElement>(null)
@@ -86,6 +87,7 @@ export function WorkspaceCanvas({
   const [detected,     setDetected]     = useState(false)
   const [wandActive,   setWandActive]   = useState(false)
   const [hasMask,      setHasMask]      = useState(false)
+  const [inpainting,   setInpainting]   = useState(false)
   const [fading,       setFading]       = useState(false)
   const [removingBg,   setRemovingBg]   = useState(false)
   const [zoneMode,     setZoneMode]     = useState(false)
@@ -164,10 +166,21 @@ export function WorkspaceCanvas({
   // ── Load image into Fabric ─────────────────────────────────────────────────
   const loadImage = useCallback(async () => {
     const canvas = fabricRef.current
-    if (!canvas) return
+    const container = containerRef.current
+    if (!canvas || !container) return
+
+    // Always re-measure and re-apply — guaranteed correct dimensions every load
+    const w = container.offsetWidth
+    const h = container.offsetHeight
+    if (w > 10 && h > 10) {
+      sizeRef.current = { w, h }
+      canvas.setDimensions({ width: w, height: h })
+      const wrap = canvas.wrapperEl as HTMLElement | null
+      if (wrap) wrap.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;`
+    }
 
     const { w: cw, h: ch } = sizeRef.current
-    if (cw < 10 || ch < 10) return  // container not measured yet
+    if (cw < 10 || ch < 10) return
 
     const url = batchRef.current[idxRef.current]?.url
 
@@ -262,11 +275,19 @@ export function WorkspaceCanvas({
     })
     fabricRef.current = canvas
 
+    // Apply container dimensions immediately — the ResizeObserver may have
+    // already populated sizeRef before Fabric was ready, so we sync here.
+    const container = containerRef.current
+    const sw = sizeRef.current.w || (container?.offsetWidth  ?? 0)
+    const sh = sizeRef.current.h || (container?.offsetHeight ?? 0)
+    if (sw > 10 && sh > 10) {
+      canvas.setDimensions({ width: sw, height: sh })
+      sizeRef.current = { w: sw, h: sh }
+    }
     const wrap = canvas.wrapperEl as HTMLElement | null
     if (wrap) {
-      wrap.style.position = 'absolute'
-      wrap.style.top = '0'
-      wrap.style.left = '0'
+      const { w, h } = sizeRef.current
+      wrap.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;`
     }
 
     canvas.on('path:created', () => setHasMask(true))
@@ -384,15 +405,65 @@ export function WorkspaceCanvas({
   }, [onFilesUpload])
 
   // ── Auto-detect ────────────────────────────────────────────────────────────
-  const handleAutoDetect = useCallback(() => {
+  const handleAutoDetect = useCallback(async () => {
     if (detecting || !hasImages) return
+    const canvas = fabricRef.current
+    const current = batchRef.current[idxRef.current]
+    if (!canvas || !current) return
+
     setDetecting(true)
     setDetected(false)
-    setTimeout(() => {
+
+    try {
+      const raw  = await fetch(current.url)
+      const blob = await raw.blob()
+      const form = new FormData()
+      form.append('file', blob, current.name + '.jpg')
+
+      const res  = await fetch('/api/v1/detect-watermark', { method: 'POST', body: form })
+      if (!res.ok) throw new Error('detect failed')
+      const data = await res.json()
+
+      // Remove old detection rects
+      canvas.getObjects()
+        .filter(o => (o as { __det?: boolean }).__det)
+        .forEach(o => canvas.remove(o))
+
+      if (data.detected && data.regions?.length > 0) {
+        const { w: cw, h: ch } = sizeRef.current
+        for (const r of data.regions) {
+          const rect = new Rect({
+            left:   (r.x_pct / 100) * cw,
+            top:    (r.y_pct / 100) * ch,
+            width:  (r.w_pct / 100) * cw,
+            height: (r.h_pct / 100) * ch,
+            fill: 'rgba(239,68,68,0.12)',
+            stroke: 'rgba(239,68,68,0.8)',
+            strokeWidth: 2,
+            strokeDashArray: [4, 3],
+            selectable: false,
+            evented: false,
+          });
+          (rect as { __det?: boolean }).__det = true
+          canvas.add(rect)
+        }
+        canvas.renderAll()
+        setDetected(true)
+        setTimeout(() => {
+          canvas.getObjects()
+            .filter(o => (o as { __det?: boolean }).__det)
+            .forEach(o => canvas.remove(o))
+          canvas.renderAll()
+          setDetected(false)
+        }, 4000)
+      } else {
+        setDetected(false)
+      }
+    } catch {
+      // Silently fail if backend not running
+    } finally {
       setDetecting(false)
-      setDetected(true)
-      setTimeout(() => setDetected(false), 2500)
-    }, 1800)
+    }
   }, [detecting, hasImages])
 
   // ── Mask operations ────────────────────────────────────────────────────────
@@ -406,30 +477,69 @@ export function WorkspaceCanvas({
     setHasMask(false)
   }, [])
 
-  const saveMask = useCallback(() => {
-    const canvas = fabricRef.current
-    if (!canvas || !onMaskSave) return
+  const saveMask = useCallback(async () => {
+    const canvas  = fabricRef.current
+    const current = batchRef.current[idxRef.current]
+    if (!canvas || !current) return
 
-    const wasBaseVisible = baseImgRef.current?.visible ?? true
-    const wasWmVisible   = wmObjRef.current?.visible   ?? true
-
+    // Export mask (paths only, no base image)
+    const wasBase = baseImgRef.current?.visible ?? true
+    const wasWm   = wmObjRef.current?.visible   ?? true
     if (baseImgRef.current) baseImgRef.current.set({ visible: false })
     if (wmObjRef.current)   wmObjRef.current.set({ visible: false })
     canvas.renderAll()
-
-    const dataUrl = canvas.toDataURL({ format: 'png' as const, multiplier: 1 })
-
-    if (baseImgRef.current) baseImgRef.current.set({ visible: wasBaseVisible })
-    if (wmObjRef.current)   wmObjRef.current.set({ visible: wasWmVisible })
+    const maskDataUrl = canvas.toDataURL({ format: 'png' as const, multiplier: 1 })
+    if (baseImgRef.current) baseImgRef.current.set({ visible: wasBase })
+    if (wmObjRef.current)   wmObjRef.current.set({ visible: wasWm })
     canvas.renderAll()
 
-    const fileId = batchRef.current[idxRef.current]?.id
-    if (fileId) {
-      onMaskSave(fileId, dataUrl)
-      setWandActive(false)
-      setHasMask(false)
+    if (onMaskSave) onMaskSave(current.id, maskDataUrl)
+    setWandActive(false)
+    setHasMask(false)
+    setInpainting(true)
+
+    try {
+      const [imgRaw, maskRaw] = await Promise.all([
+        fetch(current.url),
+        fetch(maskDataUrl),
+      ])
+      const [imgBlob, maskBlob] = await Promise.all([imgRaw.blob(), maskRaw.blob()])
+
+      const form = new FormData()
+      form.append('file', imgBlob,  current.name + '.png')
+      form.append('mask', maskBlob, 'mask.png')
+
+      const res = await fetch('/api/v1/inpaint', { method: 'POST', body: form })
+      if (!res.ok) throw new Error('inpaint failed')
+
+      const result  = await res.blob()
+      const newUrl  = URL.createObjectURL(result)
+
+      if (onUpdateFile) onUpdateFile(current.id, newUrl)
+
+      // Reload new image into canvas
+      const { w: cw, h: ch } = sizeRef.current
+      const newImg = await FabricImage.fromURL(newUrl, { crossOrigin: 'anonymous' })
+      const iw = newImg.width  ?? 1
+      const ih = newImg.height ?? 1
+      const scale = Math.min((cw * 0.95) / iw, (ch * 0.95) / ih)
+      newImg.scale(scale)
+      newImg.set({
+        left: (cw - newImg.getScaledWidth())  / 2,
+        top:  (ch - newImg.getScaledHeight()) / 2,
+        selectable: false, evented: false, hoverCursor: 'default',
+      })
+      if (baseImgRef.current) canvas.remove(baseImgRef.current)
+      canvas.add(newImg)
+      baseImgRef.current = newImg
+      canvas.sendObjectToBack(newImg)
+      canvas.renderAll()
+    } catch {
+      // If backend unreachable, mask is still saved locally
+    } finally {
+      setInpainting(false)
     }
-  }, [onMaskSave])
+  }, [onMaskSave, onUpdateFile])
 
   return (
     <div
@@ -703,15 +813,20 @@ export function WorkspaceCanvas({
               <>
                 <button
                   onClick={clearMask}
-                  className="flex items-center gap-1 rounded-lg bg-red-50 px-2 py-1 text-[11px] font-[600] text-red-500 hover:bg-red-100 transition-colors"
+                  disabled={inpainting}
+                  className="flex items-center gap-1 rounded-lg bg-red-50 px-2 py-1 text-[11px] font-[600] text-red-500 hover:bg-red-100 transition-colors disabled:opacity-40"
                 >
                   <Trash2 className="h-3 w-3" /> Clear
                 </button>
                 <button
                   onClick={saveMask}
-                  className="flex items-center gap-1 rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[11px] font-[600] text-white hover:bg-[var(--primary-hover)] transition-colors"
+                  disabled={inpainting}
+                  className="flex items-center gap-1 rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[11px] font-[600] text-white hover:bg-[var(--primary-hover)] transition-colors disabled:opacity-60"
                 >
-                  Validate mask
+                  {inpainting
+                    ? <><Loader2 className="h-3 w-3 animate-spin" /> Inpainting…</>
+                    : 'Validate & Inpaint'
+                  }
                 </button>
               </>
             )}
@@ -745,13 +860,58 @@ export function WorkspaceCanvas({
               <Trash2 className="h-3 w-3" /> Clear
             </button>
             <button
-              onClick={() => {
-                // Placeholder: send zone to API
-                console.log('Send zone to API:', zoneRect)
+              disabled={inpainting}
+              onClick={async () => {
+                const canvas  = fabricRef.current
+                const current = batchRef.current[idxRef.current]
+                if (!canvas || !current || !zoneRect) return
+                setInpainting(true)
+                try {
+                  // Build a mask: white rect on black canvas
+                  const { w: cw, h: ch } = sizeRef.current
+                  const offscreen = document.createElement('canvas')
+                  offscreen.width  = cw
+                  offscreen.height = ch
+                  const ctx = offscreen.getContext('2d')!
+                  ctx.fillStyle = '#000000'
+                  ctx.fillRect(0, 0, cw, ch)
+                  ctx.fillStyle = '#ffffff'
+                  ctx.fillRect(zoneRect.x, zoneRect.y, zoneRect.w, zoneRect.h)
+                  const maskDataUrl = offscreen.toDataURL('image/png')
+
+                  const [imgRaw, maskRaw] = await Promise.all([fetch(current.url), fetch(maskDataUrl)])
+                  const [imgBlob, maskBlob] = await Promise.all([imgRaw.blob(), maskRaw.blob()])
+                  const form = new FormData()
+                  form.append('file', imgBlob, current.name + '.png')
+                  form.append('mask', maskBlob, 'mask.png')
+
+                  const res = await fetch('/api/v1/inpaint', { method: 'POST', body: form })
+                  if (!res.ok) throw new Error('inpaint failed')
+                  const resultBlob = await res.blob()
+                  const newUrl = URL.createObjectURL(resultBlob)
+                  if (onUpdateFile) onUpdateFile(current.id, newUrl)
+
+                  const { w: ncw, h: nch } = sizeRef.current
+                  const newImg = await FabricImage.fromURL(newUrl, { crossOrigin: 'anonymous' })
+                  const scale  = Math.min((ncw * 0.95) / (newImg.width ?? 1), (nch * 0.95) / (newImg.height ?? 1))
+                  newImg.scale(scale)
+                  newImg.set({
+                    left: (ncw - newImg.getScaledWidth())  / 2,
+                    top:  (nch - newImg.getScaledHeight()) / 2,
+                    selectable: false, evented: false, hoverCursor: 'default',
+                  })
+                  if (baseImgRef.current) canvas.remove(baseImgRef.current)
+                  canvas.add(newImg)
+                  baseImgRef.current = newImg
+                  canvas.sendObjectToBack(newImg)
+                  setZoneRect(null)
+                  canvas.renderAll()
+                } catch { /* backend offline */ }
+                finally { setInpainting(false) }
               }}
-              className="flex items-center gap-1 rounded-lg bg-amber-500 px-2.5 py-1 text-[11px] font-[600] text-white hover:bg-amber-600 transition-colors"
+              className="flex items-center gap-1 rounded-lg bg-amber-500 px-2.5 py-1 text-[11px] font-[600] text-white hover:bg-amber-600 transition-colors disabled:opacity-50"
             >
-              Send Zone to API
+              {inpainting ? <><Loader2 className="h-3 w-3 animate-spin" /> Working…</> : 'Inpaint Zone'}
             </button>
           </motion.div>
         )}
