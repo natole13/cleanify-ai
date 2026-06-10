@@ -599,8 +599,8 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
 
         {/* Export JSON Terminal */}
         <motion.div variants={sidebarItem} className="px-3 py-3">
-          <motion.button whileTap={{ scale: 0.99 }} onClick={() => setTerminalOpen((v) => !v)}
-            className="flex w-full items-center justify-between bg-[#161B22] px-4 py-2.5 transition-colors hover:bg-[#1C2129]"
+          <motion.div whileTap={{ scale: 0.99 }} onClick={() => setTerminalOpen((v) => !v)}
+            className="flex w-full cursor-pointer items-center justify-between bg-[#161B22] px-4 py-2.5 transition-colors hover:bg-[#1C2129]"
             style={{ borderRadius: terminalOpen ? '12px 12px 0 0' : '12px' }}>
             <div className="flex items-center gap-2">
               <Terminal className="h-3.5 w-3.5 text-[#58a6ff]" strokeWidth={1.75} />
@@ -619,7 +619,7 @@ export function Sidebar({ config, onChange, batchFiles, onFilesUpload, onRemoveF
                 <ChevronDown className="h-3.5 w-3.5" strokeWidth={2} />
               </motion.span>
             </div>
-          </motion.button>
+          </motion.div>
           <AnimatePresence>
             {terminalOpen && (
               <motion.div

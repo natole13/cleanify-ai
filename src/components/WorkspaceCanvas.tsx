@@ -202,10 +202,13 @@ export function WorkspaceCanvas({
       const ih  = img.height ?? 1
       const scale = Math.min((cw * 0.95) / iw, (ch * 0.95) / ih)
 
-      img.scale(scale)
       img.set({
-        left: (cw - img.getScaledWidth())  / 2,
-        top:  (ch - img.getScaledHeight()) / 2,
+        scaleX: scale,
+        scaleY: scale,
+        left: cw / 2,
+        top:  ch / 2,
+        originX: 'center',
+        originY: 'center',
         selectable: false,
         evented: false,
         hoverCursor: 'default',
@@ -243,11 +246,7 @@ export function WorkspaceCanvas({
         const iw = img.width ?? 1
         const ih = img.height ?? 1
         const scale = Math.min((w * 0.95) / iw, (h * 0.95) / ih)
-        img.scale(scale)
-        img.set({
-          left: (w - img.getScaledWidth()) / 2,
-          top: (h - img.getScaledHeight()) / 2,
-        })
+        img.set({ scaleX: scale, scaleY: scale, left: w / 2, top: h / 2, originX: 'center', originY: 'center' })
         img.setCoords()
       }
       if (wmObjRef.current) updateWatermark()
@@ -288,6 +287,13 @@ export function WorkspaceCanvas({
     if (wrap) {
       const { w, h } = sizeRef.current
       wrap.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;`
+    }
+
+    // Apply dimensions already measured by the ResizeObserver
+    const { w, h } = sizeRef.current
+    if (w > 10 && h > 10) {
+      canvas.setDimensions({ width: w, height: h })
+      if (wrap) wrap.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;`
     }
 
     canvas.on('path:created', () => setHasMask(true))
@@ -598,7 +604,7 @@ export function WorkspaceCanvas({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
-            className="z-10 flex w-full flex-col items-center justify-center gap-5 text-center"
+            className="z-10 flex h-full w-full flex-col items-center justify-center gap-5 text-center"
           >
             <motion.div
               animate={dragging ? { scale: 1.04 } : { scale: 1 }}
