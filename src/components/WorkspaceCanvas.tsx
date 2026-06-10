@@ -24,6 +24,8 @@ interface Props {
   onUpdateFile?: (fileId: string, newUrl: string) => void
   batchProgress?: BatchProgress | null
   onRemoveBg?: () => Promise<void>
+  onUndo?: () => void
+  canUndo?: boolean
 }
 
 // ─── Folder-aware drop helpers ────────────────────────────────────────────────
@@ -66,6 +68,7 @@ async function getFilesFromDataTransfer(dt: DataTransfer): Promise<File[]> {
 export function WorkspaceCanvas({
   batchFiles, currentIndex, onChangeIndex, onFilesUpload,
   config, onMaskSave, onUpdateFile, batchProgress, onRemoveBg,
+  onUndo, canUndo,
 }: Props) {
   const containerRef    = useRef<HTMLDivElement>(null)
   const canvasElRef     = useRef<HTMLCanvasElement>(null)
@@ -92,6 +95,8 @@ export function WorkspaceCanvas({
   const [removingBg,   setRemovingBg]   = useState(false)
   const [zoneMode,     setZoneMode]     = useState(false)
   const [zoneRect,     setZoneRect]     = useState<{x:number,y:number,w:number,h:number}|null>(null)
+  const [brushSize,    setBrushSize]    = useState(28)
+  const [cursorPos,    setCursorPos]    = useState<{x:number,y:number}|null>(null)
 
   const hasImages   = batchFiles.length > 0
   const hasMultiple = batchFiles.length > 1
@@ -338,13 +343,21 @@ export function WorkspaceCanvas({
     if (wandActive) {
       canvas.isDrawingMode = true
       const brush = new PencilBrush(canvas)
-      brush.color = 'rgba(239,68,68,0.55)'
-      brush.width = 22
+      brush.color = 'rgba(239,68,68,0.50)'
+      brush.width = brushSize
       canvas.freeDrawingBrush = brush
     } else {
       canvas.isDrawingMode = false
+      setCursorPos(null)
     }
-  }, [wandActive])
+  }, [wandActive])  // brushSize update handled by the effect below
+
+  // Update brush width reactively without recreating the brush
+  useEffect(() => {
+    const canvas = fabricRef.current
+    if (!canvas || !wandActive || !canvas.freeDrawingBrush) return
+    canvas.freeDrawingBrush.width = brushSize
+  }, [brushSize, wandActive])
 
   // ── Zone mode: toggle Fabric selection ────────────────────────────────────
   useEffect(() => {
@@ -529,10 +542,10 @@ export function WorkspaceCanvas({
       const iw = newImg.width  ?? 1
       const ih = newImg.height ?? 1
       const scale = Math.min((cw * 0.95) / iw, (ch * 0.95) / ih)
-      newImg.scale(scale)
       newImg.set({
-        left: (cw - newImg.getScaledWidth())  / 2,
-        top:  (ch - newImg.getScaledHeight()) / 2,
+        scaleX: scale, scaleY: scale,
+        left: cw / 2, top: ch / 2,
+        originX: 'center', originY: 'center',
         selectable: false, evented: false, hoverCursor: 'default',
       })
       if (baseImgRef.current) canvas.remove(baseImgRef.current)
@@ -554,6 +567,13 @@ export function WorkspaceCanvas({
         'canvas-workspace relative flex flex-1 overflow-hidden',
         dragging && 'ring-4 ring-[var(--primary)]/40 ring-inset'
       )}
+      style={wandActive ? { cursor: 'none' } : undefined}
+      onMouseMove={(e) => {
+        if (!wandActive) return
+        const rect = containerRef.current?.getBoundingClientRect()
+        if (rect) setCursorPos({ x: e.clientX - rect.left, y: e.clientY - rect.top })
+      }}
+      onMouseLeave={() => setCursorPos(null)}
       onDragOver={e => { e.preventDefault(); setDragging(true) }}
       onDragLeave={() => setDragging(false)}
       onDrop={handleDrop}
@@ -586,13 +606,28 @@ export function WorkspaceCanvas({
         style={{
           visibility: hasImages ? 'visible' : 'hidden',
           opacity: fading ? 0 : 1,
-          cursor: wandActive ? 'crosshair' : 'default',
         }}
       />
 
       {/* Wand active ring */}
       {wandActive && hasImages && (
         <div className="pointer-events-none absolute inset-0 z-10 ring-2 ring-red-400/50 ring-inset" />
+      )}
+
+      {/* Custom brush cursor */}
+      {wandActive && cursorPos && (
+        <div
+          className="pointer-events-none absolute z-30 rounded-full"
+          style={{
+            left: cursorPos.x - brushSize / 2,
+            top:  cursorPos.y - brushSize / 2,
+            width:  brushSize,
+            height: brushSize,
+            border: '2px solid rgba(239,68,68,0.9)',
+            background: 'rgba(239,68,68,0.12)',
+            boxShadow: '0 0 0 1px rgba(255,255,255,0.4)',
+          }}
+        />
       )}
 
       {/* ── Empty state ─────────────────────────────────────────────────────── */}
@@ -812,11 +847,23 @@ export function WorkspaceCanvas({
         {wandActive && (
           <motion.div
             initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
-            className="absolute right-4 top-16 z-20 flex items-center gap-2 rounded-2xl bg-white/90 px-3 py-2 shadow-lg backdrop-blur-md"
+            className="absolute right-4 top-16 z-20 flex flex-col gap-2 rounded-2xl bg-white/92 px-3 py-2.5 shadow-lg backdrop-blur-md"
           >
-            <span className="text-[11px] font-[600] text-red-500">Paint correction area</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-[600] text-red-500">Paint to erase</span>
+              {/* Brush size */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] font-[700] uppercase tracking-wide text-gray-400">Size</span>
+                <input
+                  type="range" min={8} max={80} value={brushSize}
+                  onChange={e => setBrushSize(Number(e.target.value))}
+                  className="h-1 w-16 cursor-pointer accent-red-500"
+                />
+                <span className="w-6 text-center font-mono text-[10px] font-[600] text-red-500">{brushSize}</span>
+              </div>
+            </div>
             {hasMask && (
-              <>
+              <div className="flex items-center gap-2">
                 <button
                   onClick={clearMask}
                   disabled={inpainting}
@@ -830,11 +877,11 @@ export function WorkspaceCanvas({
                   className="flex items-center gap-1 rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[11px] font-[600] text-white hover:bg-[var(--primary-hover)] transition-colors disabled:opacity-60"
                 >
                   {inpainting
-                    ? <><Loader2 className="h-3 w-3 animate-spin" /> Inpainting…</>
+                    ? <><Loader2 className="h-3 w-3 animate-spin" /> LaMa inpainting…</>
                     : 'Validate & Inpaint'
                   }
                 </button>
-              </>
+              </div>
             )}
           </motion.div>
         )}
@@ -900,10 +947,10 @@ export function WorkspaceCanvas({
                   const { w: ncw, h: nch } = sizeRef.current
                   const newImg = await FabricImage.fromURL(newUrl, { crossOrigin: 'anonymous' })
                   const scale  = Math.min((ncw * 0.95) / (newImg.width ?? 1), (nch * 0.95) / (newImg.height ?? 1))
-                  newImg.scale(scale)
                   newImg.set({
-                    left: (ncw - newImg.getScaledWidth())  / 2,
-                    top:  (nch - newImg.getScaledHeight()) / 2,
+                    scaleX: scale, scaleY: scale,
+                    left: ncw / 2, top: nch / 2,
+                    originX: 'center', originY: 'center',
                     selectable: false, evented: false, hoverCursor: 'default',
                   })
                   if (baseImgRef.current) canvas.remove(baseImgRef.current)
@@ -920,6 +967,22 @@ export function WorkspaceCanvas({
               {inpainting ? <><Loader2 className="h-3 w-3 animate-spin" /> Working…</> : 'Inpaint Zone'}
             </button>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Undo button ──────────────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {hasImages && canUndo && !batchProgress?.active && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.85 }}
+            whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.94 }}
+            onClick={onUndo}
+            title="Undo (⌘Z)"
+            className="absolute bottom-[112px] right-4 z-20 flex items-center gap-1.5 rounded-xl bg-white/85 px-3 py-2 text-[12px] font-[600] text-gray-700 shadow-md backdrop-blur-md hover:bg-white hover:text-amber-600 transition-all"
+          >
+            <span className="text-[13px] leading-none">↩</span>
+            Undo
+          </motion.button>
         )}
       </AnimatePresence>
 

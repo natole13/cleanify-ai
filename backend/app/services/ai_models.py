@@ -1,11 +1,11 @@
 """
 AI model wrappers for Cleanify.ai — local free models only.
 
-  - remove_background  → rembg (pip install rembg, free & local)
-  - remove_watermark   → OpenCV TELEA inpainting (cv2, already in requirements)
-  - inpaint_region     → OpenCV TELEA inpainting
-  - upscale_image      → Lanczos + sharpening (PIL, no extra deps)
-  - auto_detect        → OpenCV heuristic (no extra deps)
+  - remove_background  → rembg with birefnet-general (pixel-perfect, local)
+  - remove_watermark   → OpenCV TELEA (auto-detect) or manual mask
+  - inpaint_region     → IOPaint / LaMa (local), falls back to OpenCV TELEA
+  - upscale_image      → Lanczos + sharpening (PIL)
+  - auto_detect        → OpenCV heuristic
 """
 from __future__ import annotations
 
@@ -22,13 +22,26 @@ logger = logging.getLogger(__name__)
 # ─── Background Removal ───────────────────────────────────────────────────────
 
 async def remove_background(img: Image.Image) -> Image.Image:
-    """Remove image background using rembg (free, local, no API key needed)."""
+    """
+    Pixel-perfect background removal using rembg with BiRefNet model.
+    BiRefNet is state-of-the-art — dramatically better than u2net for fine edges,
+    hair, fur, and complex boundaries.
+    First run downloads ~175 MB model to ~/.cache/; cached locally after that.
+    """
     try:
-        from rembg import remove  # type: ignore
-        return remove(img)
+        from rembg import remove, new_session  # type: ignore
+        session = new_session("birefnet-general")
+        return remove(img, session=session)
     except ImportError:
-        logger.warning("rembg not installed — run: pip install rembg")
+        logger.warning("rembg not installed — run: pip install 'rembg[cpu]'")
         return img
+    except Exception as exc:
+        logger.warning("BiRefNet failed (%s), retrying with u2net…", exc)
+        try:
+            from rembg import remove  # type: ignore
+            return remove(img)
+        except Exception:
+            return img
 
 
 # ─── Watermark / Inpainting ───────────────────────────────────────────────────
@@ -38,9 +51,9 @@ async def remove_watermark(
     mask: Optional[Image.Image] = None,
 ) -> Image.Image:
     """
-    Detect and inpaint watermarks using OpenCV TELEA inpainting.
-    If mask provided (from Manual Wand), uses it directly.
-    Otherwise auto-detects text-like regions with adaptive thresholding.
+    Detect and erase watermarks.
+    With mask: uses it directly with LaMa inpainting.
+    Auto mode: detects text-like regions with adaptive thresholding → LaMa inpaint.
     """
     if mask is not None:
         return await inpaint_region(img, mask)
@@ -50,10 +63,8 @@ async def remove_watermark(
         gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
 
         thresh = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            blockSize=15, C=4,
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, blockSize=15, C=4,
         )
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 5))
         dilated = cv2.dilate(thresh, kernel, iterations=3)
@@ -67,17 +78,16 @@ async def remove_watermark(
             area = cw * ch
             if area < (w * h) * 0.0003 or area > (w * h) * 0.40:
                 continue
-            aspect = cw / max(ch, 1)
-            if aspect < 1.2 or cw / w > 0.85:
+            if cw / max(ch, 1) < 1.2 or cw / w > 0.85:
                 continue
             cv2.rectangle(wm_mask, (x, y), (x + cw, y + ch), 255, -1)
 
         if wm_mask.max() == 0:
             return img
 
-        result = cv2.inpaint(img_rgb, wm_mask, inpaintRadius=4, flags=cv2.INPAINT_TELEA)
-        out = Image.fromarray(result)
-        return out.convert(img.mode) if img.mode != "RGB" else out
+        # Use PIL Image as mask for LaMa
+        mask_img = Image.fromarray(wm_mask)
+        return await inpaint_region(img, mask_img)
 
     except Exception as exc:
         logger.warning("Watermark removal failed: %s", exc)
@@ -86,8 +96,8 @@ async def remove_watermark(
 
 async def remove_object(img: Image.Image, prompt: str) -> Image.Image:
     """
-    Remove described objects. For text/watermark/logo prompts, delegates to
-    remove_watermark. Full accuracy needs Grounded-SAM (production upgrade).
+    Remove objects by text description. Delegates to watermark detector for
+    text/logo prompts. Full accuracy requires Grounded-SAM (production upgrade).
     """
     text_keywords = ("text", "watermark", "logo", "stamp", "overlay", "caption", "subtitle")
     if any(kw in prompt.lower() for kw in text_keywords):
@@ -143,21 +153,35 @@ async def auto_detect_pipeline(img: Image.Image) -> dict:
 
 async def inpaint_region(img: Image.Image, mask: Image.Image) -> Image.Image:
     """
-    Inpaint masked region using OpenCV TELEA algorithm.
+    Inpaint masked region using IOPaint / LaMa (local, no API key).
     mask: white (255) = inpaint, black (0) = keep.
+    Falls back to OpenCV TELEA if iopaint is not installed.
+    First run downloads ~100 MB LaMa model to ~/.cache/; cached after that.
     """
+    img_rgb = np.array(img.convert("RGB"))
+    mask_np = np.array(mask.convert("L"))
+    _, mask_bin = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+
     try:
-        img_rgb = np.array(img.convert("RGB"))
-        mask_np = np.array(mask.convert("L"))
-        _, mask_bin = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+        from iopaint.model_manager import ModelManager   # type: ignore
+        from iopaint.schema import InpaintRequest, HDStrategy  # type: ignore
+
+        manager = ModelManager(name="lama", device="cpu")
+        config  = InpaintRequest(hd_strategy=HDStrategy.ORIGINAL, hd_strategy_crop_margin=32, hd_strategy_crop_trigger_size=2048)
+        result_np = manager(img_rgb, mask_bin, config)
+        out = Image.fromarray(result_np.astype(np.uint8))
+        return out.convert(img.mode) if img.mode not in ("RGB",) else out
+
+    except ImportError:
+        logger.info("iopaint not installed — using OpenCV TELEA (run: pip install iopaint)")
+    except Exception as exc:
+        logger.warning("LaMa inpainting failed: %s — falling back to OpenCV TELEA", exc)
+
+    # OpenCV TELEA fallback — good quality for small masks
+    try:
         result = cv2.inpaint(img_rgb, mask_bin, inpaintRadius=4, flags=cv2.INPAINT_TELEA)
         out = Image.fromarray(result)
-        return out.convert(img.mode) if img.mode not in ("RGB", "RGBA") else out
+        return out.convert(img.mode) if img.mode != "RGB" else out
     except Exception as exc:
-        logger.warning("Inpainting failed: %s — using blur fallback", exc)
-        from PIL import ImageFilter
-        result = img.copy().convert("RGBA")
-        mask_l = mask.convert("L").resize(img.size)
-        blurred = img.filter(ImageFilter.GaussianBlur(radius=15))
-        result = Image.composite(blurred.convert("RGBA"), result, mask_l)
-        return result.convert(img.mode) if img.mode != "RGBA" else result
+        logger.warning("OpenCV inpaint also failed: %s", exc)
+        return img

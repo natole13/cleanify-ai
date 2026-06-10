@@ -972,10 +972,35 @@ export default function App() {
   const [batchProgress, setBatchProgress] = useState<{ active: boolean; current: number; total: number } | null>(null)
   const [isLoggedIn,    setIsLoggedIn]   = useState(false)
   const [showAuthModal, setShowAuthModal] = useState(false)
+  const [undoStack,     setUndoStack]    = useState<{ files: BatchFile[]; index: number }[]>([])
   const batchIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Cleanup interval on unmount
   useEffect(() => () => { if (batchIntervalRef.current) clearInterval(batchIntervalRef.current) }, [])
+
+  const canUndo = undoStack.length > 0
+
+  const handleUndo = useCallback(() => {
+    setUndoStack(prev => {
+      if (prev.length === 0) return prev
+      const { files, index } = prev[prev.length - 1]
+      setBatchFiles(files)
+      setCurrentIndex(index)
+      return prev.slice(0, -1)
+    })
+  }, [])
+
+  // Ctrl/Cmd+Z keyboard shortcut
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        handleUndo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [handleUndo])
 
   const handleAddToBatch = useCallback((files: BatchFile[]) => {
     setBatchFiles((prev) => {
@@ -1024,6 +1049,8 @@ export default function App() {
     const current = batchFiles[currentIndex]
     if (!current) return
 
+    const snapshot = { files: batchFiles, index: currentIndex }
+
     const raw = await fetch(current.url)
     const blob = await raw.blob()
     const form = new FormData()
@@ -1037,6 +1064,7 @@ export default function App() {
 
     if (current.source === 'upload') URL.revokeObjectURL(current.url)
 
+    setUndoStack(prev => [...prev.slice(-19), snapshot])
     setBatchFiles((prev) =>
       prev.map((f, i) => i === currentIndex ? { ...f, url: newUrl } : f)
     )
@@ -1055,6 +1083,8 @@ export default function App() {
     const total = files.length
     if (total === 0) return
     if (batchIntervalRef.current) clearInterval(batchIntervalRef.current)
+
+    const snapshot = { files: [...batchFiles], index: currentIndex }
 
     setBatchProgress({ active: true, current: 0, total })
     setCurrentIndex(0)
@@ -1103,6 +1133,7 @@ export default function App() {
     }
 
     if (results.length > 0) {
+      setUndoStack(prev => [...prev.slice(-19), snapshot])
       setBatchFiles(prev => prev.map(f => {
         const r = results.find(x => x.id === f.id)
         if (!r) return f
@@ -1145,6 +1176,8 @@ export default function App() {
           onUpdateFile={handleUpdateFile}
           batchProgress={batchProgress}
           onRemoveBg={handleRemoveBg}
+          onUndo={handleUndo}
+          canUndo={canUndo}
         />
         <Sidebar
           config={config}
