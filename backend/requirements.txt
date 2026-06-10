@@ -1,0 +1,28 @@
+# ─── Core ─────────────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.7.0
+
+# ─── Image processing ─────────────────────────────────────────────────────────
+pillow==11.0.0
+opencv-python-headless==4.10.0.84
+numpy>=1.24.0
+
+# ─── HTTP client (image download) ────────────────────────────────────────────
+httpx==0.28.1
+
+# ─── Auth ─────────────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ─── File I/O ─────────────────────────────────────────────────────────────────
+python-multipart==0.0.19
+aiofiles==24.1.0
+python-dotenv==1.0.1
+
+# ─── AI models ────────────────────────────────────────────────────────────────
+rembg==2.0.59              # Background removal
+# realesrgan==0.3.0          # 4× upscaling
+# openai==1.58.0             # GPT-4 Vision for auto-detect
+# torch — install separately (CPU): pip install torch --index-url https://download.pytorch.org/whl/cpu
